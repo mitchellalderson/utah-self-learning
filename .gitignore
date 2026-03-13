@@ -10,3 +10,5 @@ workspace/sessions/
 workspace/memory.md
 # Test workspaces
 workspace-*
+package-lock.json
+workspace/scores/

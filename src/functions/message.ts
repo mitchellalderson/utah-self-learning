@@ -12,6 +12,7 @@
 import { inngest, agentMessageReceived } from "../client.ts";
 import { createAgentLoop } from "../agent-loop.ts";
 import { appendToSession } from "../lib/session.ts";
+import { config } from "../config.ts";
 
 export const handleMessage = inngest.createFunction(
   {
@@ -57,6 +58,20 @@ export const handleMessage = inngest.createFunction(
           channel,
           destination,
           channelMeta,
+        },
+      });
+    }
+
+    // Spawn async scoring (runs independently, doesn't block reply)
+    if (config.scoring.enabled) {
+      await step.sendEvent("score", {
+        name: "agent.score.request",
+        data: {
+          userMessage: message,
+          agentResponse: result.response,
+          toolCallCount: result.toolCalls,
+          sessionKey,
+          promptVersion: "v1",
         },
       });
     }

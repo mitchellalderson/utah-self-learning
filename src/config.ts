@@ -44,4 +44,10 @@ export const config = {
   },
 
   incrementalReplies: process.env.AGENT_INCREMENTAL_REPLIES === "true",
+
+  scoring: {
+    enabled: process.env.SCORING_ENABLED !== "false",
+    provider: (process.env.SCORING_PROVIDER || "anthropic") as "anthropic" | "openai",
+    model: process.env.SCORING_MODEL || "claude-3-5-haiku-20241022",
+  },
 };

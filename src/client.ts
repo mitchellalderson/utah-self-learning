@@ -41,6 +41,16 @@ export const agentSubagentSpawn = eventType("agent.subagent.spawn", {
   }>(),
 });
 
+export const agentScoreRequest = eventType("agent.score.request", {
+  schema: staticSchema<{
+    userMessage: string;
+    agentResponse: string;
+    toolCallCount: number;
+    sessionKey: string;
+    promptVersion: string;
+  }>(),
+});
+
 export const inngest = new Inngest({
   id: "ai-agent",
   checkpointing: true,

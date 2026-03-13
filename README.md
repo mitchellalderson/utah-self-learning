@@ -91,6 +91,7 @@ src/
 │   ├── context.ts             # System prompt builder with workspace file injection
 │   ├── session.ts             # JSONL session persistence
 │   ├── memory.ts              # File-based memory system (daily logs + distillation)
+│   ├── scoring.ts             # Response quality evaluation
 │   └── compaction.ts          # LLM-powered conversation summarization
 ├── functions/
 │   ├── message.ts             # Main agent function (singleton + cancelOn)
@@ -113,6 +114,7 @@ workspace/                       # Agent workspace (persisted across runs)
 ├── USER.md                    # User information
 ├── MEMORY.md                  # Long-term memory (agent-writable)
 ├── memory/                    # Daily logs (YYYY-MM-DD.md, auto-managed)
+├── scores/                    # Response quality scores (YYYY-MM-DD.jsonl)
 └── sessions/                  # JSONL conversation files (gitignored)
 ```
 
@@ -138,6 +140,7 @@ One incoming message triggers multiple independent functions:
 | `agent-handle-message`   | Run the agent loop                       | Singleton per chat, cancel on new message |
 | `acknowledge-message`    | Show "typing..." immediately             | No retries (best effort)                  |
 | `send-reply`             | Format and send the response             | 3 retries, channel dispatch               |
+| `agent-handle-score`     | Evaluate response quality (async)        | 1 retry, fires after reply sent           |
 | `agent-heartbeat`        | Distill daily logs into long-term memory | Cron (every 30 min)                       |
 | `global-failure-handler` | Catch errors, notify user                | Triggered by `inngest/function.failed`    |
 
@@ -161,6 +164,48 @@ The agent has a two-tier memory system:
 - **Long-term memory** (`workspace/MEMORY.md`) — curated summary distilled from daily logs by the heartbeat function
 
 The `agent-heartbeat` function runs on a cron schedule (default: every 30 minutes). It checks if daily logs have accumulated enough content, then uses the LLM to distill them into `MEMORY.md`. Old daily logs are pruned after a configurable retention period (default: 30 days).
+
+### Response Scoring
+
+After each agent response, a lightweight LLM evaluates response quality across four dimensions:
+
+| Dimension       | Scale | Description                                   |
+| --------------- | ----- | --------------------------------------------- |
+| Relevance       | 0-10  | Did the response address the user's question? |
+| Completeness    | 0-10  | Was anything important missing?               |
+| Tool Efficiency | 0-10  | Were tool calls necessary and well-targeted?  |
+| Tone Alignment  | 0-10  | Did it match SOUL.md guidelines?              |
+
+Scores are persisted to `workspace/scores/YYYY-MM-DD.jsonl` as JSON lines:
+
+```json
+{
+  "timestamp": "2026-03-12T...",
+  "sessionKey": "main",
+  "promptVersion": "v1",
+  "relevance": 8,
+  "completeness": 7,
+  "toolEfficiency": 9,
+  "tone": 8,
+  "composite": 8.0,
+  "rationale": "Addressed the core question..."
+}
+```
+
+**How it works:**
+
+- Runs **asynchronously** after the reply is sent (doesn't block delivery)
+- Uses a cheaper model (default: Claude Haiku) to keep costs low
+- Composite score = simple average of the four dimensions
+- Failures don't affect reply delivery
+
+**Configuration (env vars):**
+
+| Variable           | Default                     | Description              |
+| ------------------ | --------------------------- | ------------------------ |
+| `SCORING_ENABLED`  | `true`                      | Enable/disable scoring   |
+| `SCORING_PROVIDER` | `anthropic`                 | Provider for scoring LLM |
+| `SCORING_MODEL`    | `claude-3-5-haiku-20241022` | Model for scoring        |
 
 ### Conversation Compaction
 
