@@ -91,6 +91,7 @@ src/
 │   ├── context.ts             # System prompt builder with workspace file injection
 │   ├── session.ts             # JSONL session persistence
 │   ├── memory.ts              # File-based memory system (daily logs + distillation)
+│   ├── prompt-version.ts      # Prompt versioning and A/B testing
 │   ├── scoring.ts             # Response quality evaluation
 │   └── compaction.ts          # LLM-powered conversation summarization
 ├── functions/
@@ -110,10 +111,13 @@ src/
         ├── transform.ts       # Webhook transform
         └── format.ts          # Formatting for channel messages
 workspace/                       # Agent workspace (persisted across runs)
-├── SOUL.md                    # Agent personality and behavioral guidelines
+├── SOUL.md                    # Agent personality and behavioral guidelines (fallback)
 ├── USER.md                    # User information
 ├── MEMORY.md                  # Long-term memory (agent-writable)
 ├── memory/                    # Daily logs (YYYY-MM-DD.md, auto-managed)
+├── prompts/                   # Versioned prompts for A/B testing
+│   ├── registry.json          # Version metadata
+│   └── v1/SOUL.md             # Versioned behavioral prompts
 ├── scores/                    # Response quality scores (YYYY-MM-DD.jsonl)
 └── sessions/                  # JSONL conversation files (gitignored)
 ```
@@ -155,6 +159,8 @@ The agent reads markdown files from the workspace directory and injects them int
 | `MEMORY.md` | Curated long-term memory (agent-writable)                  |
 
 Edit these files to customize your agent's personality and knowledge. The agent can also update `MEMORY.md` using the `write` tool to remember things across conversations.
+
+**Note:** `SOUL.md` supports versioning for A/B testing — see [Prompt Versioning](#prompt-versioning) below.
 
 ### Memory System
 
@@ -205,6 +211,66 @@ Scores are persisted to `workspace/scores/YYYY-MM-DD.jsonl` as JSON lines:
 | `SCORING_ENABLED`  | `true`                     | Enable/disable scoring   |
 | `SCORING_PROVIDER` | `anthropic`                | Provider for scoring LLM |
 | `SCORING_MODEL`    | `claude-sonnet-4-20250514` | Model for scoring        |
+
+### Prompt Versioning
+
+The agent supports A/B testing of behavioral prompts through versioned `SOUL.md` files:
+
+```
+workspace/prompts/
+├── registry.json        # Version metadata + active assignments
+├── v1/
+│   └── SOUL.md          # Baseline prompt
+├── v2/
+│   └── SOUL.md          # First variation
+└── v3/
+    └── SOUL.md          # Second variation
+```
+
+**registry.json schema:**
+
+```json
+{
+  "versions": [
+    {
+      "id": "v1",
+      "created": "2026-03-15T00:00:00Z",
+      "source": "baseline",
+      "active": true,
+      "weight": 0.5
+    },
+    {
+      "id": "v2",
+      "created": "2026-03-16T00:00:00Z",
+      "source": "evaluation-pipeline",
+      "active": true,
+      "weight": 0.5,
+      "parentVersion": "v1"
+    }
+  ],
+  "currentDefault": "v2"
+}
+```
+
+**How it works:**
+
+- On each agent loop start, the context builder reads `registry.json`
+- Selects a prompt version using **weighted random selection** from active versions
+- Weights are normalized automatically if they don't sum to 1.0
+- The selected version's `SOUL.md` is injected into the system prompt
+- Version ID is stored in session metadata and scoring logs for analysis
+
+**Automatic initialization:**
+
+- If `registry.json` is missing, the system auto-creates a fresh `v1` registry
+- Copies the current `workspace/SOUL.md` to `workspace/prompts/v1/SOUL.md`
+- If root `SOUL.md` doesn't exist, creates a default prompt
+
+**Configuration:**
+
+| Variable                    | Default | Description                      |
+| --------------------------- | ------- | -------------------------------- |
+| `PROMPT_VERSIONING_ENABLED` | `true`  | Enable/disable prompt versioning |
 
 ### Conversation Compaction
 

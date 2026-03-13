@@ -46,6 +46,7 @@ export const handleMessage = inngest.createFunction(
       await appendToSession(sessionKey, "assistant", result.response, {
         iterations: result.iterations,
         toolCalls: result.toolCalls,
+        promptVersion: result.promptVersion,
       });
     });
 
@@ -71,7 +72,7 @@ export const handleMessage = inngest.createFunction(
           agentResponse: result.response,
           toolCallCount: result.toolCalls,
           sessionKey,
-          promptVersion: "v1",
+          promptVersion: result.promptVersion,
         },
       });
     }

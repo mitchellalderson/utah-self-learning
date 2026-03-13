@@ -11,6 +11,12 @@ import { resolve } from "path";
 import { config } from "../config.ts";
 import { buildMemoryContext } from "./memory.ts";
 import { loadSession, type SessionMessage } from "./session.ts";
+import { selectPromptVersion } from "./prompt-version.ts";
+
+export interface SystemPromptResult {
+  prompt: string;
+  promptVersion: string;
+}
 
 /**
  * Load an optional markdown file from the workspace root.
@@ -35,11 +41,22 @@ async function loadOptionalFile(filename: string): Promise<string | null> {
  * 3. Memory (MEMORY.md + daily logs)
  * 4. Tool usage guidelines
  */
-export async function buildSystemPrompt(): Promise<string> {
+export async function buildSystemPrompt(): Promise<SystemPromptResult> {
   const identity = await loadOptionalFile("IDENTITY.md");
-  const soul = await loadOptionalFile("SOUL.md");
   const user = await loadOptionalFile("USER.md");
   const memory = await buildMemoryContext();
+
+  let soul: string | null;
+  let promptVersion: string;
+
+  if (config.prompts.versioningEnabled) {
+    const selection = await selectPromptVersion();
+    soul = selection.soulContent || null;
+    promptVersion = selection.versionId;
+  } else {
+    soul = await loadOptionalFile("SOUL.md");
+    promptVersion = "unversioned";
+  }
 
   const parts: string[] = [];
 
@@ -98,7 +115,10 @@ Working directory: ${config.workspace.root}
 - If one tool call gives you the answer, respond immediately.
 - Never loop on the same tool with slightly different inputs hoping for a better result.`);
 
-  return parts.join("\n\n---\n\n");
+  return {
+    prompt: parts.join("\n\n---\n\n"),
+    promptVersion,
+  };
 }
 
 /**

@@ -50,4 +50,8 @@ export const config = {
     provider: (process.env.SCORING_PROVIDER || "anthropic") as "anthropic" | "openai",
     model: process.env.SCORING_MODEL || "claude-3-5-haiku-20241022",
   },
+
+  prompts: {
+    versioningEnabled: process.env.PROMPT_VERSIONING_ENABLED !== "false",
+  },
 };

@@ -37,6 +37,7 @@ export interface AgentRunResult {
   toolCalls: number;
   model: string;
   incrementalRepliesSent: number;
+  promptVersion: string;
 }
 
 // --- Context Pruning ---
@@ -144,7 +145,7 @@ export function createAgentLoop(
     });
 
     // Build system prompt (loads SOUL.md, USER.md, memory)
-    const systemPrompt = await step.run("load-context", async () => {
+    const { prompt: systemPrompt, promptVersion } = await step.run("load-context", async () => {
       return await buildSystemPrompt();
     });
 
@@ -464,6 +465,7 @@ export function createAgentLoop(
       toolCalls: totalToolCalls,
       model: `${config.llm.provider}/${config.llm.model}`,
       incrementalRepliesSent: emittedTextParts.length,
+      promptVersion,
     };
   };
 }
