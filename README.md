@@ -195,17 +195,16 @@ Scores are persisted to `workspace/scores/YYYY-MM-DD.jsonl` as JSON lines:
 **How it works:**
 
 - Runs **asynchronously** after the reply is sent (doesn't block delivery)
-- Uses a cheaper model (default: Claude Haiku) to keep costs low
 - Composite score = simple average of the four dimensions
 - Failures don't affect reply delivery
 
 **Configuration (env vars):**
 
-| Variable           | Default                     | Description              |
-| ------------------ | --------------------------- | ------------------------ |
-| `SCORING_ENABLED`  | `true`                      | Enable/disable scoring   |
-| `SCORING_PROVIDER` | `anthropic`                 | Provider for scoring LLM |
-| `SCORING_MODEL`    | `claude-3-5-haiku-20241022` | Model for scoring        |
+| Variable           | Default                    | Description              |
+| ------------------ | -------------------------- | ------------------------ |
+| `SCORING_ENABLED`  | `true`                     | Enable/disable scoring   |
+| `SCORING_PROVIDER` | `anthropic`                | Provider for scoring LLM |
+| `SCORING_MODEL`    | `claude-sonnet-4-20250514` | Model for scoring        |
 
 ### Conversation Compaction
 
