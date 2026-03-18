@@ -18,6 +18,8 @@ export interface PromptVersion {
   active: boolean;
   weight: number;
   parentVersion?: string;
+  childVersion?: string;
+  lastEvaluatedCount?: number;
 }
 
 export interface PromptRegistry {

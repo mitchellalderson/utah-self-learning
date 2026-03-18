@@ -91,14 +91,16 @@ src/
 │   ├── context.ts             # System prompt builder with workspace file injection
 │   ├── session.ts             # JSONL session persistence
 │   ├── memory.ts              # File-based memory system (daily logs + distillation)
-│   ├── prompt-version.ts      # Prompt versioning and A/B testing
-│   ├── scoring.ts             # Response quality evaluation
-│   └── compaction.ts          # LLM-powered conversation summarization
+│   ├── prompt-version.ts    # Prompt versioning and A/B testing
+│   ├── scoring.ts           # Response quality evaluation
+│   ├── evaluation.ts        # Prompt performance analysis and improvement
+│   └── compaction.ts        # LLM-powered conversation summarization
 ├── functions/
 │   ├── message.ts             # Main agent function (singleton + cancelOn)
 │   ├── send-reply.ts          # Channel-agnostic reply dispatch
 │   ├── acknowledge-message.ts # Message acknowledgment (typing indicator, etc.)
 │   ├── heartbeat.ts           # Cron-based memory maintenance
+│   ├── evaluate-prompts.ts    # Cron-based prompt improvement
 │   └── failure-handler.ts     # Global error handler with notifications
 └── channels/
     ├── types.ts               # ChannelHandler interface
@@ -146,6 +148,7 @@ One incoming message triggers multiple independent functions:
 | `send-reply`             | Format and send the response             | 3 retries, channel dispatch               |
 | `agent-handle-score`     | Evaluate response quality (async)        | 1 retry, fires after reply sent           |
 | `agent-heartbeat`        | Distill daily logs into long-term memory | Cron (every 30 min)                       |
+| `evaluate-prompts`       | Analyze scores, improve prompts          | Cron (every 6 hours)                      |
 | `global-failure-handler` | Catch errors, notify user                | Triggered by `inngest/function.failed`    |
 
 ### Workspace Context Injection
@@ -206,11 +209,11 @@ Scores are persisted to `workspace/scores/YYYY-MM-DD.jsonl` as JSON lines:
 
 **Configuration (env vars):**
 
-| Variable           | Default                    | Description              |
-| ------------------ | -------------------------- | ------------------------ |
-| `SCORING_ENABLED`  | `true`                     | Enable/disable scoring   |
-| `SCORING_PROVIDER` | `anthropic`                | Provider for scoring LLM |
-| `SCORING_MODEL`    | `claude-sonnet-4-20250514` | Model for scoring        |
+| Variable           | Default                     | Description              |
+| ------------------ | --------------------------- | ------------------------ |
+| `SCORING_ENABLED`  | `true`                      | Enable/disable scoring   |
+| `SCORING_PROVIDER` | `anthropic`                 | Provider for scoring LLM |
+| `SCORING_MODEL`    | `claude-3-5-haiku-20241022` | Model for scoring        |
 
 ### Prompt Versioning
 
@@ -271,6 +274,61 @@ workspace/prompts/
 | Variable                    | Default | Description                      |
 | --------------------------- | ------- | -------------------------------- |
 | `PROMPT_VERSIONING_ENABLED` | `true`  | Enable/disable prompt versioning |
+
+### Evaluation Pipeline
+
+The evaluation pipeline automatically analyzes scored responses and generates improved prompt versions:
+
+#### Testing with Smaller Models
+
+For testing the evaluation pipeline, use a smaller model like Haiku instead of Sonnet. Sonnet produces consistently high-quality responses, making it difficult to generate the score variance needed to trigger prompt improvements:
+
+```env
+# Switch to Haiku for testing
+AGENT_MODEL=claude-3-5-haiku-20241022
+```
+
+Haiku is more likely to produce varied scores across different question types, which helps the evaluation pipeline identify underperforming prompt versions and generate meaningful improvements.
+
+**How it works:**
+
+A cron function (`evaluate-prompts`) runs on a configurable schedule (default: every 6 hours):
+
+1. **Load scores** — Reads all JSONL files from `workspace/scores/`
+2. **Aggregate** — Groups scores by prompt version, computes averages
+3. **Identify underperformers** — Finds versions with:
+   - Composite score below target (default: 7.0), OR
+   - Composite score significantly below best version (default: 1.0+ points gap)
+4. **Generate improvements** — Calls LLM with underperforming prompt + rationales to produce improved SOUL.md
+5. **Create new versions** — Writes improved prompts to `workspace/prompts/vN/SOUL.md`
+6. **Promote winners** — Versions with ≥80% traffic share and ≥1.0 point advantage over default become new default
+7. **Enforce cap** — If >5 active versions, retire lowest-scoring (v1 is never retired)
+
+**Weight redistribution:**
+
+- New versions start at 50% weight (configurable)
+- Remaining weight distributed proportionally among other active versions
+- Weights normalized automatically
+
+**Safety rails:**
+
+- Minimum data points required before any rewrite (default: 10)
+- Maximum active versions cap (default: 5)
+- Baseline (v1) is never deleted, only deprioritized
+- New versions never start at 100% — always keep a control
+
+**Configuration (env vars):**
+
+| Variable                   | Default       | Description                                    |
+| -------------------------- | ------------- | ---------------------------------------------- |
+| `EVALUATION_CRON`          | `0 */6 * * *` | Cron schedule for evaluation runs              |
+| `EVAL_MIN_DATA_POINTS`     | `10`          | Minimum scores before version can be rewritten |
+| `EVAL_TARGET_COMPOSITE`    | `7.0`         | Target composite score threshold               |
+| `EVAL_MAX_VERSIONS`        | `5`           | Maximum active versions before retirement      |
+| `EVAL_NEW_VERSION_WEIGHT`  | `0.5`         | Initial weight for new versions                |
+| `EVAL_PROMOTION_TRAFFIC`   | `0.8`         | Traffic share required for promotion           |
+| `EVAL_PROMOTION_SCORE_GAP` | `1.0`         | Score advantage required for promotion         |
+| `EVAL_SIGNIFICANT_GAP`     | `1.0`         | Points below best to trigger rewrite           |
 
 ### Conversation Compaction
 

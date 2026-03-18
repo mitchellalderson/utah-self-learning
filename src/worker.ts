@@ -11,6 +11,7 @@ import { failureHandler } from "./functions/failure-handler.ts";
 import { heartbeat } from "./functions/heartbeat.ts";
 import { subAgent } from "./functions/sub-agent.ts";
 import { handleScore } from "./functions/score.ts";
+import { evaluatePrompts } from "./functions/evaluate-prompts.ts";
 import { ensureWorkspace } from "./lib/session.ts";
 import { setup } from "./setup.ts";
 import { config } from "./config.ts";
@@ -24,6 +25,7 @@ const functions = [
   heartbeat,
   subAgent,
   handleScore,
+  evaluatePrompts,
 ];
 
 async function main() {
