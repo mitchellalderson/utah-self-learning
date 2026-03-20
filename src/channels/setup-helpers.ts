@@ -1,8 +1,4 @@
-/**
- * Shared helpers for channel setup scripts.
- *
- * Provides Inngest REST API access for webhook management.
- */
+/** Shared helpers for channel setup — Inngest REST API access for webhook management. */
 
 const INNGEST_API = "https://api.inngest.com";
 
@@ -12,9 +8,6 @@ function getSigningKey(): string {
   return key;
 }
 
-/**
- * Fetch from the Inngest REST API (authenticated with signing key).
- */
 export async function inngestFetch(path: string, options: RequestInit = {}): Promise<any> {
   const envHeaders: Record<string, string> = {};
   if (process.env.INNGEST_ENV) {

@@ -1,9 +1,4 @@
-/**
- * Session — JSONL-based conversation history.
- *
- * Each message is appended as a JSON line. On load, the last N
- * messages are read for context. Simple, portable, inspectable.
- */
+/** Session — JSONL-based conversation history. Append-only, load last N. */
 
 import { readFile, writeFile, appendFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
@@ -51,9 +46,6 @@ export async function appendToSession(
   await appendFile(path, JSON.stringify(msg) + "\n", "utf-8");
 }
 
-/**
- * Rewrite the entire session file (used after compaction).
- */
 export async function writeSession(sessionKey: string, messages: SessionMessage[]): Promise<void> {
   const path = sessionPath(sessionKey);
   await mkdir(dirname(path), { recursive: true });

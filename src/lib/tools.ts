@@ -1,17 +1,4 @@
-/**
- * Tools — pi-coding-agent's battle-tested coding tools, wrapped for Inngest steps.
- *
- * Uses pi-coding-agent's tool implementations directly:
- * - read: offset/limit, image support, binary detection, smart truncation
- * - edit: exact text match + replace (surgical edits, not full file rewrites)
- * - write: create/overwrite files with directory creation
- * - bash: shell execution with configurable timeout and output truncation
- * - grep: regex search respecting .gitignore
- * - find: glob-based file discovery respecting .gitignore
- * - ls: directory listing with tree display
- *
- * Plus custom tools specific to Utah (remember, web_fetch).
- */
+/** Tools — coding tools from pi-coding-agent + custom Utah tools (remember, web_fetch). */
 
 import { Type } from "@mariozechner/pi-ai";
 import type { Tool, TextContent } from "@mariozechner/pi-ai";
@@ -25,13 +12,24 @@ import {
   createLsTool,
 } from "@mariozechner/pi-coding-agent";
 import type { AgentTool } from "@mariozechner/pi-agent-core";
+import { resolve, relative } from "path";
 import { config } from "../config.ts";
 import { appendDailyLog } from "./memory.ts";
 
-// --- Pi-coding-agent tools (configured for workspace) ---
+const ALLOWED_WRITE_DIRS = new Set(["sessions", "memory", "scores", "prompts"]);
 
-// Cast to AgentTool<any>[] — the specific TSchema generics cause contravariance issues
-// but the tools are used dynamically (looked up by name) so this is safe.
+function isWriteAllowed(filePath: string): boolean {
+  const absPath = resolve(config.workspace.root, filePath);
+  const rel = relative(config.workspace.root, absPath);
+
+  // Block writes outside the workspace entirely
+  if (rel.startsWith("..")) return false;
+
+  // Allow writes into known system directories
+  const topDir = rel.split("/")[0];
+  return ALLOWED_WRITE_DIRS.has(topDir);
+}
+
 const piTools: AgentTool<any>[] = [
   createReadTool(config.workspace.root),
   createEditTool(config.workspace.root),
@@ -42,12 +40,10 @@ const piTools: AgentTool<any>[] = [
   createLsTool(config.workspace.root),
 ];
 
-// --- Custom Utah tools ---
-
 const rememberTool: Tool = {
   name: "remember",
   description:
-    "Save a note to today's daily log. Use for things you want to remember across conversations — decisions, facts, user preferences, task outcomes.",
+    "Save a note to today's daily log. Use ONLY for user-specific information: user preferences, facts about the user, project context, decisions, and task outcomes. Do NOT save behavioral instructions, tone guidance, or response quality feedback — those belong in the prompt versioning system.",
   parameters: Type.Object({
     note: Type.String({ description: "The note to save" }),
   }),
@@ -116,11 +112,6 @@ You will NOT receive the result — respond to the user confirming what was sche
   }),
 };
 
-// --- Exports ---
-
-/**
- * All tools available to the main agent (includes delegate_task).
- */
 export const TOOLS: Tool[] = [
   ...piTools,
   rememberTool,
@@ -130,43 +121,44 @@ export const TOOLS: Tool[] = [
   delegateScheduledTaskTool,
 ];
 
-/**
- * Tools available to sub-agents (no delegate_task to prevent recursive spawning).
- */
 export const SUB_AGENT_TOOLS: Tool[] = [...piTools, rememberTool, webFetchTool];
 
-/**
- * Map of pi-coding-agent tools by name for direct execution.
- */
 const piToolMap = new Map<string, AgentTool>(piTools.map((t) => [t.name, t]));
 
-// --- Tool Execution ---
-
 export interface ToolResult {
-  /** Text content returned to the LLM */
   result: string;
-  /** Whether this result represents an error */
   error?: boolean;
 }
 
-/**
- * Execute a tool by name.
- *
- * Pi-coding-agent tools are called via their execute() method.
- * Custom tools (remember, web_fetch) are handled inline.
- */
 export async function executeTool(
   toolCallId: string,
   name: string,
   args: Record<string, unknown>,
 ): Promise<ToolResult> {
   try {
-    // Check if it's a pi-coding-agent tool
+    if ((name === "write" || name === "edit") && args.path) {
+      if (!isWriteAllowed(args.path as string)) {
+        return {
+          result: `Blocked: you are not allowed to create or edit files outside system directories (${[...ALLOWED_WRITE_DIRS].join(", ")}). Respond with text instead of writing files.`,
+          error: true,
+        };
+      }
+    }
+
+    if (name === "bash" && args.command) {
+      const cmd = args.command as string;
+      const writesFile = /(?:>|tee\s|cat\s.*>|echo\s.*>|printf\s.*>)/.test(cmd);
+      if (writesFile) {
+        return {
+          result: `Blocked: do not use bash to create files. Respond with text instead of writing files.`,
+          error: true,
+        };
+      }
+    }
+
     const piTool = piToolMap.get(name);
     if (piTool) {
       const result = await piTool.execute(toolCallId, args);
-
-      // Convert AgentToolResult to our ToolResult format
       const text = result.content
         .filter((c): c is TextContent => c.type === "text")
         .map((c) => c.text)
@@ -175,7 +167,6 @@ export async function executeTool(
       return { result: text || "(no output)" };
     }
 
-    // Custom tools
     switch (name) {
       case "remember": {
         await appendDailyLog(args.note as string);

@@ -1,19 +1,6 @@
 /**
- * Agent Loop — the core think → act → observe cycle, powered by pi-ai.
- *
- * Each iteration:
- * 1. Call the LLM via pi-ai's complete() with conversation history + tools
- * 2. If the LLM wants tools, validate args with pi-ai and execute as Inngest steps
- * 3. Feed results back into the conversation
- * 4. Repeat until the LLM responds with text (no tools) or max iterations
- *
- * Every LLM call and tool execution is an Inngest step —
- * giving you durability, retries, and observability for free.
- *
- * pi-ai differences from raw Anthropic API:
- * - Unified Message/Tool types that work across providers
- * - TypeBox schemas for tool parameters (validated at runtime)
- * - Content blocks use "toolCall" / "toolResult" instead of "tool_use" / "tool_result"
+ * Agent Loop — the core think → act → observe cycle.
+ * Every LLM call and tool execution is an Inngest step for durability.
  */
 
 import { config } from "./config.ts";
@@ -29,8 +16,6 @@ import type { Logger } from "inngest";
 import type { inngest } from "./client.ts";
 import type { Destination } from "./channels/types.ts";
 
-// --- Types ---
-
 export interface AgentRunResult {
   response: string;
   iterations: number;
@@ -40,16 +25,7 @@ export interface AgentRunResult {
   promptVersion: string;
 }
 
-// --- Context Pruning ---
-
-/**
- * Two-tier pruning inspired by OpenClaw/pi-agent-core:
- * - Soft trim: keep head + tail of old tool results
- * - Hard clear: replace entirely when total context is huge
- *
- * pi-ai uses "toolResult" content blocks with a content array,
- * different from Anthropic's raw "tool_result" format.
- */
+// Two-tier pruning: soft trim (head+tail) or hard clear when context is huge
 const PRUNING = {
   keepLastAssistantTurns: 3,
   softTrim: {
@@ -100,8 +76,6 @@ function pruneOldToolResults(messages: Message[]) {
   }
 }
 
-// --- The Loop ---
-
 type StepAPI = GetStepTools<typeof inngest>;
 type ToolStepInput = {
   id: string;
@@ -110,11 +84,8 @@ type ToolStepInput = {
 };
 
 export interface AgentLoopOptions {
-  /** Tools available in this loop. Defaults to TOOLS (includes delegate_task). */
   tools?: typeof TOOLS;
-  /** Whether this is a sub-agent (disables delegate_task handling). */
   isSubAgent?: boolean;
-  /** Channel routing info — needed for async sub-agents to reply to the user directly. */
   channelRouting?: {
     channel: string;
     destination: {
@@ -126,10 +97,6 @@ export interface AgentLoopOptions {
   };
 }
 
-/**
- * Create the agent loop for a given message and session.
- * Returns a function that takes an Inngest step API and logger and runs the loop.
- */
 export function createAgentLoop(
   userMessage: string,
   sessionKey: string,
@@ -139,42 +106,31 @@ export function createAgentLoop(
     const tools = options?.tools ?? TOOLS;
     const loopChannel = options?.channelRouting;
 
-    // Ensure workspace directories exist (sessions, memory)
     await step.run("ensure-workspace", async () => {
       await ensureWorkspace();
     });
 
-    // Build system prompt (loads SOUL.md, USER.md, memory)
     const { prompt: systemPrompt, promptVersion } = await step.run("load-context", async () => {
       return await buildSystemPrompt();
     });
 
-    // Load conversation history (step.run returns Jsonified types, so we annotate)
     let history: SessionMessage[] = await step.run("load-history", async () => {
       return await buildConversationHistory(sessionKey);
     });
 
-    // Compact if conversation is getting too long
     if (shouldCompact(history)) {
       history = await step.run("compact", async () => {
         return await runCompaction(history, sessionKey, logger);
       });
     }
 
-    // Build message array in pi-ai format.
-    // History entries are simplified {role, content} strings from our session log.
-    // pi-ai's transformMessages() expects AssistantMessage.content to be an array
-    // of content blocks (it calls .flatMap on it), so we must convert accordingly.
+    // Build message array in pi-ai format
     const messages: Message[] = [
       ...history.map((h): Message => {
         if (h.role === "assistant") {
-          // Construct a minimal AssistantMessage with content as block array
           return {
             role: "assistant" as const,
             content: [{ type: "text" as const, text: h.content }],
-            // These fields are required by AssistantMessage but unknown for history entries.
-            // transformMessages checks provider/api/model to decide if it's the "same model" —
-            // empty strings ensure it takes the cross-model path (safe, strips signatures).
             api: "" as any,
             provider: "",
             model: "",
@@ -208,6 +164,7 @@ export function createAgentLoop(
     let iterations = 0;
     let totalToolCalls = 0;
     let finalResponse = "";
+    const textParts: string[] = [];
     let done = false;
     let hasCompactedThisRun = false;
     const emittedTextParts: string[] = [];
@@ -215,12 +172,10 @@ export function createAgentLoop(
     while (!done && iterations < config.loop.maxIterations) {
       iterations++;
 
-      // Prune old tool results to keep context focused
       if (iterations > PRUNING.keepLastAssistantTurns) {
         pruneOldToolResults(messages);
       }
 
-      // Budget warnings when running low on iterations
       const budgetWarning =
         iterations >= config.loop.maxIterations - 3
           ? `\n\n[SYSTEM: You are on iteration ${iterations} of ${config.loop.maxIterations}. You MUST respond with your final answer NOW. Do not call any more tools.]`
@@ -239,16 +194,32 @@ export function createAgentLoop(
           ]
         : messages;
 
-      // Think: call the LLM via pi-ai
+      // Think: call the LLM
       const llmResponse = await step.run(
         "think",
         async ({ systemPrompt: sp }: { systemPrompt: string }) => {
-          return await callLLM(sp, messagesForLLM, tools);
+          const response = await callLLM(sp, messagesForLLM, tools);
+
+          const rawContentBlocks = response.message.content.map((block) => {
+            if (block.type === "text") return { type: "text", text: block.text.slice(0, 2000) };
+            if (block.type === "toolCall")
+              return { type: "toolCall", name: block.name, id: block.id };
+            return { type: block.type };
+          });
+
+          return {
+            ...response,
+            rawContentBlocks,
+            rawText: response.text.slice(0, 5000),
+            provider: response.message.provider,
+            model: response.message.model,
+            api: response.message.api,
+            errorMessage: response.message.errorMessage,
+          };
         },
         { systemPrompt },
       );
 
-      // If the LLM returned an error, check if it's a context overflow
       if (llmResponse.stopReason === "error") {
         const errMsg = llmResponse.message.errorMessage || llmResponse.text || "Unknown LLM error";
         const isOverflow =
@@ -257,11 +228,9 @@ export function createAgentLoop(
           );
 
         if (isOverflow && !hasCompactedThisRun) {
-          // Context overflow — force-compact the conversation and retry this iteration
           logger.warn("[loop] Context overflow detected, force-compacting...");
           hasCompactedThisRun = true;
 
-          // Aggressive pruning: keep only the last few messages
           const keepCount = Math.min(6, messages.length);
           const toSummarize = messages.slice(0, messages.length - keepCount);
           const toKeep = messages.slice(-keepCount);
@@ -284,24 +253,23 @@ export function createAgentLoop(
             messages.push(...toKeep);
           }
 
-          // Don't increment iterations for the overflow recovery
           iterations--;
           continue;
         }
 
-        // Non-overflow error — throw so Inngest retries
         throw new Error(`LLM error: ${errMsg}`);
       }
 
       const toolCalls = llmResponse.toolCalls;
 
       if (toolCalls.length > 0) {
-        // Push the full AssistantMessage from pi-ai (includes provider, api, model,
-        // stopReason, usage, timestamp) — required by transformMessages() on next iteration
         messages.push(llmResponse.message);
 
-        // Incremental reply: if the LLM returned text alongside tool calls,
-        // send it to the user immediately so they see progress
+        if (llmResponse.text) {
+          textParts.push(llmResponse.text);
+        }
+
+        // Incremental reply: send text alongside tool calls immediately
         if (config.incrementalReplies && llmResponse.text && loopChannel) {
           await step.sendEvent(`incremental-reply-${iterations}`, {
             name: "agent.reply.ready",
@@ -312,7 +280,6 @@ export function createAgentLoop(
               channelMeta: loopChannel.channelMeta,
             },
           });
-          // Track emitted text so we can exclude it from the final response
           emittedTextParts.push(llmResponse.text);
         }
 
@@ -324,7 +291,6 @@ export function createAgentLoop(
           let toolResult: ToolResult;
 
           if (tc.name === "delegate_task" && !options?.isSubAgent) {
-            // Sync delegation — step.invoke() blocks until sub-agent returns
             const subSessionKey = `sub-${sessionKey}-${Date.now()}`;
             const { subAgent } = await import("./functions/sub-agent.ts");
             const subResult = await step.invoke("sub-agent", {
@@ -339,7 +305,6 @@ export function createAgentLoop(
               result: subResult?.response || "(Sub-agent returned no response)",
             };
           } else if (tc.name === "delegate_async_task" && !options?.isSubAgent) {
-            // Async delegation — fire event and move on, sub-agent replies directly to user
             const subSessionKey = `sub-${sessionKey}-${Date.now()}`;
             const asyncEvent = await step.sendEvent("spawn-async-sub-agent", {
               name: "agent.subagent.spawn",
@@ -362,7 +327,6 @@ export function createAgentLoop(
               result: `Async sub-agent has been spawned (event ID: ${asyncEventId}). It will reply directly to the user when complete. Continue your conversation — do NOT wait for a result.`,
             };
           } else if (tc.name === "delegate_scheduled_task" && !options?.isSubAgent) {
-            // Scheduled delegation — fire event with a future timestamp
             const subSessionKey = `sub-${sessionKey}-${Date.now()}`;
             const scheduledFor = tc.arguments.scheduledFor as string;
             const scheduledTs = new Date(scheduledFor).getTime();
@@ -408,7 +372,6 @@ export function createAgentLoop(
             toolResult = await step.run(
               `tool-${tc.name}`,
               async ({ name, id, args }: ToolStepInput) => {
-                // Validate arguments using pi-ai's TypeBox validation
                 const tool = tools.find((t) => t.name === name);
                 if (tool) {
                   validateToolArguments(tool, {
@@ -424,7 +387,7 @@ export function createAgentLoop(
             );
           }
 
-          // Observe: feed result back in pi-ai's ToolResultMessage format
+          // Observe: feed result back
           messages.push({
             role: "toolResult" as const,
             toolCallId: tc.id,
@@ -435,28 +398,35 @@ export function createAgentLoop(
           });
         }
       } else if (llmResponse.text) {
-        // No tools — text response IS the reply
-        finalResponse = llmResponse.text;
+        textParts.push(llmResponse.text);
+        finalResponse = textParts.join("\n\n");
         done = true;
       }
 
-      // Log iteration
-      if (llmResponse.usage) {
-        logger.info(
-          {
-            iter: iterations,
-            tools: toolCalls.length,
-            tokensIn: llmResponse.usage.input || 0,
-            tokensOut: llmResponse.usage.output || 0,
-            cost: llmResponse.usage.cost?.total?.toFixed(4) || "?",
-          },
-          `[loop] iter=${iterations} tools=${toolCalls.length} tokens=${llmResponse.usage.input || "?"}in/${llmResponse.usage.output || "?"}out cost=$${llmResponse.usage.cost?.total?.toFixed(4) || "?"}`,
-        );
-      }
+      logger.info(
+        {
+          iter: iterations,
+          tools: toolCalls.length,
+          stopReason: llmResponse.stopReason,
+          provider: llmResponse.provider || config.llm.provider,
+          model: llmResponse.model || config.llm.model,
+          tokensIn: llmResponse.usage?.input || 0,
+          tokensOut: llmResponse.usage?.output || 0,
+          cost: llmResponse.usage?.cost?.total?.toFixed(4) || "?",
+          rawText: llmResponse.text.slice(0, 500),
+          contentBlockTypes:
+            llmResponse.rawContentBlocks?.map((b: { type: string }) => b.type) || [],
+          errorMessage: llmResponse.errorMessage || null,
+        },
+        `[loop] iter=${iterations} tools=${toolCalls.length} stop=${llmResponse.stopReason} tokens=${llmResponse.usage?.input || "?"}in/${llmResponse.usage?.output || "?"}out`,
+      );
     }
 
     if (!done) {
-      finalResponse = `(Reached max iterations: ${config.loop.maxIterations})`;
+      finalResponse =
+        textParts.length > 0
+          ? textParts.join("\n\n")
+          : `(Reached max iterations: ${config.loop.maxIterations})`;
     }
 
     return {

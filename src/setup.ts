@@ -1,11 +1,4 @@
-/**
- * Setup — orchestrates channel setup at startup.
- *
- * Iterates over registered channels and runs their setup if configured.
- *
- * Run at startup (via worker.ts) or standalone:
- *   node --experimental-strip-types src/setup.ts
- */
+/** Setup — runs channel setup (webhooks, etc.) at startup. */
 
 import { logger } from "./lib/logger.ts";
 import { config } from "./config.ts";

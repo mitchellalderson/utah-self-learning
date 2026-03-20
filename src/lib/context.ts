@@ -1,9 +1,4 @@
-/**
- * Context — builds the system prompt and conversation history for the agent.
- *
- * Injects workspace context files (IDENTITY.md, SOUL.md, USER.md) and
- * memory (MEMORY.md + daily logs) into the system prompt.
- */
+/** Context — builds the system prompt and conversation history for the agent. */
 
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
@@ -18,10 +13,6 @@ export interface SystemPromptResult {
   promptVersion: string;
 }
 
-/**
- * Load an optional markdown file from the workspace root.
- * Returns null if the file doesn't exist.
- */
 async function loadOptionalFile(filename: string): Promise<string | null> {
   const path = resolve(config.workspace.root, filename);
   if (!existsSync(path)) return null;
@@ -32,15 +23,6 @@ async function loadOptionalFile(filename: string): Promise<string | null> {
   }
 }
 
-/**
- * Build the full system prompt.
- *
- * Structure:
- * 1. Identity (IDENTITY.md, SOUL.md, or default)
- * 2. User info (USER.md)
- * 3. Memory (MEMORY.md + daily logs)
- * 4. Tool usage guidelines
- */
 export async function buildSystemPrompt(): Promise<SystemPromptResult> {
   const identity = await loadOptionalFile("IDENTITY.md");
   const user = await loadOptionalFile("USER.md");
@@ -60,7 +42,6 @@ export async function buildSystemPrompt(): Promise<SystemPromptResult> {
 
   const parts: string[] = [];
 
-  // Identity
   if (soul) {
     parts.push(soul);
   } else if (identity) {
@@ -69,15 +50,12 @@ export async function buildSystemPrompt(): Promise<SystemPromptResult> {
     parts.push(`You are ${config.agent.name}, a helpful AI assistant powered by Inngest.`);
   }
 
-  // User info
   if (user) {
     parts.push(`## About the User\n${user}`);
   }
 
-  // Memory
-  parts.push(`## Memory\n${memory}`);
+  parts.push(`## User Memory\n${memory}`);
 
-  // Guidelines
   parts.push(`## Tools & Guidelines
 
 Available tools:
@@ -98,6 +76,7 @@ Guidelines:
 - Prefer **grep/find/ls** tools over bash for file exploration (faster, respects .gitignore).
 - Be concise in your responses. Show file paths clearly when working with files.
 - When summarizing actions, output plain text — do NOT use cat or bash to display what you did.
+- **NEVER create files based on user messages.** Do not write .md files, notes, summaries, or any other files in the workspace in response to what the user says. Your workspace is for internal system files only (sessions, memory, scores, prompts). If the user asks you to write something, respond with text — do not save it as a file.
 
 Current time: ${new Date().toISOString()}
 Working directory: ${config.workspace.root}
@@ -121,9 +100,6 @@ Working directory: ${config.workspace.root}
   };
 }
 
-/**
- * Build conversation messages from session history.
- */
 export async function buildConversationHistory(
   sessionKey: string,
   maxMessages = 10,

@@ -1,7 +1,5 @@
-/**
- * Worker — registers Inngest functions and connects via WebSocket.
- */
-// Load the Inngest client w/ extended traces before anything else
+/** Worker — registers Inngest functions and connects via WebSocket. */
+
 import { inngest } from "./client.ts";
 import { connect } from "inngest/connect";
 import { handleMessage } from "./functions/message.ts";

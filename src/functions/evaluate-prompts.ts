@@ -1,13 +1,4 @@
-/**
- * Evaluate Prompts — cron-based prompt performance evaluation
- *
- * Runs on a configurable schedule (default: every 6 hours) to:
- * 1. Aggregate scoring data by prompt version
- * 2. Identify underperforming versions
- * 3. Generate improved prompts via LLM
- * 4. Promote winning versions
- * 5. Retire lowest performers when over cap
- */
+/** Evaluate Prompts — cron that aggregates scores, promotes winners, rewrites underperformers. */
 
 import { inngest } from "../client.ts";
 import { config } from "../config.ts";
@@ -19,7 +10,7 @@ import {
   generateImprovedPrompt,
   createNewVersion,
   promoteWinners,
-  retireLowestPerformer,
+  enforceVersionCap,
   savePerformanceSummary,
 } from "../lib/evaluation.ts";
 import { loadRegistry, saveRegistry } from "../lib/prompt-version.ts";
@@ -58,17 +49,29 @@ export const evaluatePrompts = inngest.createFunction(
       return await loadRegistry();
     });
 
-    // Step 3.5: Save performance summary
-    await step.run("save-summary", async () => {
-      await savePerformanceSummary(stats, registry);
+    // Step 4: Promote winners (before retirement so best performer is protected)
+    const promotionResult = await step.run("promote-winners", async () => {
+      const promotedId = promoteWinners(stats, registry);
+      return promotedId;
     });
 
-    // Step 4: Identify and fix underperformers
+    // Step 5: Enforce version cap BEFORE creating new versions
+    // This culls low-weight zombies and retires worst performers down to maxVersions
+    const retirementResult = await step.run("enforce-cap", async () => {
+      const retiredIds = enforceVersionCap(stats, registry);
+      return retiredIds;
+    });
+
+    // Step 6: Identify and fix underperformers (only after cap is enforced)
     const rewriteResults = await step.run("check-rewrites", async () => {
       const underperformers = identifyUnderperformers(stats, registry);
       const results: Array<{ parentId: string; newVersionId: string; reason: string }> = [];
 
-      for (const underperformer of underperformers) {
+      // Only create new versions if we have room (or will replace 1:1)
+      const activeCount = registry.versions.filter((v) => v.active).length;
+      const maxNewVersions = Math.max(0, config.evaluation.maxVersions - activeCount);
+
+      for (const underperformer of underperformers.slice(0, maxNewVersions)) {
         try {
           logger.info(
             {
@@ -103,19 +106,11 @@ export const evaluatePrompts = inngest.createFunction(
       return results;
     });
 
-    // Step 5: Promote winners
-    const promotionResult = await step.run("promote-winners", async () => {
-      const promotedId = promoteWinners(stats, registry);
-      return promotedId;
+    // Step 7: Save performance summary and registry
+    await step.run("save-summary", async () => {
+      await savePerformanceSummary(stats, registry);
     });
 
-    // Step 6: Enforce version cap
-    const retirementResult = await step.run("enforce-cap", async () => {
-      const retiredId = retireLowestPerformer(stats, registry);
-      return retiredId;
-    });
-
-    // Step 7: Save registry
     await step.run("save-registry", async () => {
       await saveRegistry(registry);
     });
@@ -127,7 +122,7 @@ export const evaluatePrompts = inngest.createFunction(
       rewritesTriggered: rewriteResults.length,
       rewrites: rewriteResults,
       promotedToDefault: promotionResult,
-      retiredVersion: retirementResult,
+      retiredVersions: retirementResult,
     };
   },
 );

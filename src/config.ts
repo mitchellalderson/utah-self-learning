@@ -18,6 +18,8 @@ export const config = {
     model: process.env.AGENT_MODEL || "claude-sonnet-4-20250514",
     // API keys are read from env by pi-ai automatically:
     //   ANTHROPIC_API_KEY, OPENAI_API_KEY, GOOGLE_API_KEY
+    // Optional: override the OpenAI base URL for compatible APIs (e.g. Ollama, LiteLLM, vLLM)
+    openaiBaseUrl: process.env.OPENAI_BASE_URL || "",
   },
 
   loop: {
@@ -61,8 +63,8 @@ export const config = {
     targetComposite: parseFloat(process.env.EVAL_TARGET_COMPOSITE || "7.0"),
     maxVersions: parseInt(process.env.EVAL_MAX_VERSIONS || "5"),
     newVersionWeight: parseFloat(process.env.EVAL_NEW_VERSION_WEIGHT || "0.5"),
-    promotionTrafficThreshold: parseFloat(process.env.EVAL_PROMOTION_TRAFFIC || "0.8"),
-    promotionScoreGap: parseFloat(process.env.EVAL_PROMOTION_SCORE_GAP || "1.0"),
+    promotionTrafficThreshold: parseFloat(process.env.EVAL_PROMOTION_TRAFFIC || "0.6"),
+    promotionScoreGap: parseFloat(process.env.EVAL_PROMOTION_SCORE_GAP || "0.3"),
     significantGap: parseFloat(process.env.EVAL_SIGNIFICANT_GAP || "1.0"),
   },
 };

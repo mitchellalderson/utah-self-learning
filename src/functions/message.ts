@@ -1,13 +1,4 @@
-/**
- * Message Handler — the main agent function.
- *
- * Trigger: agent.message.received
- * Flow: load session → run agent loop → save result → emit reply event
- *
- * Key Inngest features used:
- * - Singleton (one run per chat at a time)
- * - Step-based execution (each LLM call and tool is a step)
- */
+/** Message Handler — load session → run agent loop → save result → emit reply event. */
 
 import { inngest, agentMessageReceived } from "../client.ts";
 import { createAgentLoop } from "../agent-loop.ts";

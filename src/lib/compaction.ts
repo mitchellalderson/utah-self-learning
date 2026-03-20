@@ -1,20 +1,9 @@
-/**
- * Compaction — LLM-powered conversation summarization.
- *
- * When the conversation gets too long, older messages are summarized
- * into a structured checkpoint. Recent messages are kept verbatim.
- * Uses pi-ai's complete() for the summarization call — same provider
- * as the main agent loop.
- *
- * Inspired by OpenClaw/pi-agent-core's compaction system.
- */
+/** Compaction — when conversation gets too long, older messages are LLM-summarized. */
 
 import { callLLM } from "./llm.ts";
 import { loadSession, writeSession, type SessionMessage } from "./session.ts";
 import { config } from "../config.ts";
 import type { Logger } from "inngest";
-
-// --- Summarization Prompts ---
 
 const SUMMARIZATION_SYSTEM_PROMPT =
   "You are a summarization assistant. Create concise, structured summaries that preserve all important context, decisions, and progress.";
@@ -52,12 +41,7 @@ Use this EXACT format:
 
 Keep each section concise. Preserve exact file paths, function names, and error messages.`;
 
-// --- Token Estimation ---
-
-// SessionMessage imported from ./session.ts
-
 function estimateMessageTokens(msg: SessionMessage): number {
-  // Session messages always have string content (serialized from JSONL)
   const chars = msg.content.length;
   return Math.ceil(chars / 4);
 }
@@ -66,19 +50,11 @@ export function estimateTokens(messages: SessionMessage[]): number {
   return messages.reduce((sum, msg) => sum + estimateMessageTokens(msg), 0);
 }
 
-// --- Compaction Logic ---
-
-/**
- * Check if compaction should run based on estimated token count.
- */
 export function shouldCompact(messages: SessionMessage[]): boolean {
   const estimated = estimateTokens(messages);
   return estimated > config.compaction.maxTokens * config.compaction.threshold;
 }
 
-/**
- * Serialize messages to text for the summarization LLM.
- */
 function serializeConversation(messages: SessionMessage[]): string {
   return messages
     .map((msg) => {
@@ -88,20 +64,11 @@ function serializeConversation(messages: SessionMessage[]): string {
     .join("\n\n");
 }
 
-/**
- * Run compaction: summarize old messages, keep recent ones.
- *
- * Uses pi-ai's complete() for the summarization call, so it works
- * with whatever provider is configured (Anthropic, OpenAI, Google).
- *
- * Returns the new message array (summary + recent).
- */
 export async function runCompaction(
   messages: SessionMessage[],
   sessionKey: string,
   logger: Logger,
 ): Promise<SessionMessage[]> {
-  // Find cut point: keep approximately keepRecentTokens worth of recent messages
   let recentTokens = 0;
   let cutIndex = messages.length;
 
@@ -113,13 +80,11 @@ export async function runCompaction(
     }
   }
 
-  // Don't compact if cut would leave nothing to summarize
   if (cutIndex <= 1) return messages;
 
   const toSummarize = messages.slice(0, cutIndex);
   const toKeep = messages.slice(cutIndex);
 
-  // Generate summary using pi-ai
   const conversationText = serializeConversation(toSummarize);
   const promptText = `<conversation>\n${conversationText}\n</conversation>\n\n${SUMMARIZATION_PROMPT}`;
 
@@ -131,7 +96,6 @@ export async function runCompaction(
 
   const summaryText = response.text;
 
-  // Build compacted message array
   const summaryMessage: SessionMessage = {
     role: "user",
     content: `The conversation history before this point was compacted into the following summary:\n\n<summary>\n${summaryText}\n</summary>`,
@@ -140,7 +104,6 @@ export async function runCompaction(
 
   const compacted = [summaryMessage, ...toKeep];
 
-  // Persist the compacted session
   await writeSession(sessionKey, compacted);
 
   logger.info(

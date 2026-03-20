@@ -1,9 +1,4 @@
-/**
- * LLM — wrapper around pi-ai's complete() function.
- *
- * pi-ai provides a unified interface for multiple LLM providers
- * (Anthropic, OpenAI, Google) with TypeBox-based tool validation.
- */
+/** LLM — wrapper around pi-ai's complete() function. */
 
 import { getModel, complete, validateToolArguments } from "@mariozechner/pi-ai";
 import type {
@@ -11,6 +6,7 @@ import type {
   Message,
   AssistantMessage,
   KnownProvider,
+  Model,
   TextContent,
   ToolCall,
 } from "@mariozechner/pi-ai";
@@ -19,29 +15,38 @@ import { config } from "../config.ts";
 export type { Tool, Message, AssistantMessage, TextContent, ToolCall };
 export { validateToolArguments };
 
-let _model: ReturnType<typeof getModel> | null = null;
+let _model: ReturnType<typeof getModel> | Model<"openai-completions"> | null = null;
 
 export function getConfiguredModel() {
   if (!_model) {
-    // Provider and model come from runtime config (env vars).
-    // getModel's generics require literal types from the MODELS registry,
-    // so we assert here — an invalid combo will throw at runtime.
-    _model = getModel(config.llm.provider as KnownProvider as any, config.llm.model as any);
-    if (!_model) {
-      throw new Error(
-        `Unknown model "${config.llm.model}" for provider "${config.llm.provider}". Check AGENT_MODEL and LLM_PROVIDER env vars.`,
-      );
+    if (config.llm.openaiBaseUrl) {
+      _model = {
+        id: config.llm.model,
+        name: config.llm.model,
+        api: "openai-completions",
+        provider: config.llm.provider || "openai",
+        baseUrl: config.llm.openaiBaseUrl,
+        reasoning: false,
+        input: ["text"] as const,
+        cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        contextWindow: 128_000,
+        maxTokens: 32_000,
+      } satisfies Model<"openai-completions">;
+    } else {
+      _model = getModel(config.llm.provider as KnownProvider as any, config.llm.model as any);
+      if (!_model) {
+        throw new Error(
+          `Unknown model "${config.llm.model}" for provider "${config.llm.provider}". Check AGENT_MODEL and LLM_PROVIDER env vars.`,
+        );
+      }
     }
   }
   return _model;
 }
 
 export interface LLMResponse {
-  /** The full AssistantMessage from pi-ai — push this directly into the message array */
   message: AssistantMessage;
-  /** Extracted text content for convenience */
   text: string;
-  /** Extracted tool calls for convenience */
   toolCalls: Array<{ id: string; name: string; arguments: Record<string, unknown> }>;
   usage: AssistantMessage["usage"];
   stopReason: AssistantMessage["stopReason"];

@@ -1,9 +1,4 @@
-/**
- * Prompt Versioning — A/B testing and version management for SOUL.md
- *
- * Allows multiple versions of behavioral prompts to coexist,
- * with weighted random selection for experimentation.
- */
+/** Prompt Versioning — A/B testing for SOUL.md with weighted random selection. */
 
 import { readFile, writeFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";

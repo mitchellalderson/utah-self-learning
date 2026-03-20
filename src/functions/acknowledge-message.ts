@@ -1,14 +1,4 @@
-/**
- * Acknowledge Message — generic Inngest function that dispatches to the correct channel.
- *
- * Listens for agent.message.received events and acknowledges receipt
- * on the appropriate channel. Best-effort: no retries.
- *
- * What "acknowledge" means per channel:
- * - Telegram: typing indicator
- * - Slack: 👀 emoji reaction on the message
- * - Discord: typing indicator
- */
+/** Acknowledge Message — typing indicator or emoji reaction on receipt. Best-effort. */
 
 import { inngest, agentMessageReceived } from "../client.ts";
 import { getChannel } from "../channels/index.ts";

@@ -1,9 +1,4 @@
-/**
- * Global Failure Handler — catches all function failures.
- *
- * Logs errors and notifies the user via the originating channel
- * (Telegram, Slack, etc.) if the original event came from one.
- */
+/** Global Failure Handler — logs errors and notifies the user via the originating channel. */
 
 import { inngest } from "../client.ts";
 import { getChannel } from "../channels/index.ts";

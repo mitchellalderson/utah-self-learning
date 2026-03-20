@@ -1,9 +1,4 @@
-/**
- * Evaluation — prompt performance analysis and improvement pipeline
- *
- * Aggregates scoring data, identifies underperforming prompt versions,
- * and generates improved prompts via LLM.
- */
+/** Evaluation — aggregates scores, identifies underperformers, generates improved prompts. */
 
 import { readdir, readFile, writeFile, mkdir } from "fs/promises";
 import { existsSync } from "fs";
@@ -316,37 +311,69 @@ export function promoteWinners(stats: VersionStatsMap, registry: PromptRegistry)
     return null;
   }
 
-  const defaultStats = stats[registry.currentDefault];
+  let bestVersion: PromptVersion | null = null;
+  let bestComposite = 0;
 
   for (const version of registry.versions) {
-    if (!version.active || version.id === registry.currentDefault) continue;
-
+    if (!version.active) continue;
     const vStats = stats[version.id];
     if (!vStats || vStats.count < cfg.minDataPoints) continue;
 
-    const hasEnoughTraffic = version.weight >= cfg.promotionTrafficThreshold;
-    const scoreAdvantage = vStats.avgComposite - (defaultStats?.avgComposite ?? 0);
-    const outperformsDefault = scoreAdvantage >= cfg.promotionScoreGap;
-
-    if (hasEnoughTraffic && outperformsDefault) {
-      const oldDefault = registry.currentDefault;
-      registry.currentDefault = version.id;
-
-      logger.info(
-        {
-          newDefault: version.id,
-          oldDefault,
-          scoreAdvantage: scoreAdvantage.toFixed(2),
-          trafficWeight: (version.weight * 100).toFixed(1) + "%",
-        },
-        "[evaluation] Promoted version to currentDefault",
-      );
-
-      return version.id;
+    if (vStats.avgComposite > bestComposite) {
+      bestComposite = vStats.avgComposite;
+      bestVersion = version;
     }
   }
 
-  return null;
+  if (!bestVersion) return null;
+
+  const defaultStats = stats[registry.currentDefault];
+  const defaultComposite = defaultStats?.avgComposite ?? 0;
+  const scoreAdvantage = bestComposite - defaultComposite;
+
+  if (bestVersion.id !== registry.currentDefault && scoreAdvantage >= cfg.promotionScoreGap) {
+    const oldDefault = registry.currentDefault;
+    registry.currentDefault = bestVersion.id;
+
+    logger.info(
+      {
+        newDefault: bestVersion.id,
+        oldDefault,
+        scoreAdvantage: scoreAdvantage.toFixed(2),
+      },
+      "[evaluation] Promoted version to currentDefault",
+    );
+  }
+
+  const targetBestWeight = cfg.promotionTrafficThreshold;
+  const activeVersions = registry.versions.filter((v) => v.active);
+
+  if (activeVersions.length > 1 && bestVersion.weight < targetBestWeight) {
+    const remainingWeight = 1.0 - targetBestWeight;
+    const otherActive = activeVersions.filter((v) => v.id !== bestVersion!.id);
+    const otherTotalWeight = otherActive.reduce((sum, v) => sum + v.weight, 0);
+
+    bestVersion.weight = targetBestWeight;
+    for (const version of otherActive) {
+      version.weight =
+        otherTotalWeight > 0
+          ? (version.weight / otherTotalWeight) * remainingWeight
+          : remainingWeight / otherActive.length;
+    }
+
+    registry.versions = normalizeWeights(registry.versions);
+
+    logger.info(
+      {
+        bestVersion: bestVersion.id,
+        bestWeight: (bestVersion.weight * 100).toFixed(1) + "%",
+        bestComposite: bestComposite.toFixed(2),
+      },
+      "[evaluation] Redistributed weight toward best performer",
+    );
+  }
+
+  return bestVersion.id !== registry.currentDefault ? null : bestVersion.id;
 }
 
 export async function savePerformanceSummary(
@@ -390,54 +417,61 @@ ${rows.join("\n")}
   );
 }
 
-export function retireLowestPerformer(
-  stats: VersionStatsMap,
-  registry: PromptRegistry,
-): string | null {
+const MIN_WEIGHT_THRESHOLD = 0.02;
+
+export function enforceVersionCap(stats: VersionStatsMap, registry: PromptRegistry): string[] {
   const cfg = config.evaluation;
-  const activeVersions = registry.versions.filter((v) => v.active);
+  const retired: string[] = [];
 
-  if (activeVersions.length <= cfg.maxVersions) {
-    return null;
-  }
-
-  const candidates = activeVersions.filter((v) => v.id !== "v1");
-
-  if (candidates.length === 0) {
-    logger.warn("[evaluation] Cannot retire — only v1 remains");
-    return null;
-  }
-
-  let lowestScore = Infinity;
-  let lowestVersion: PromptVersion | null = null;
-
-  for (const version of candidates) {
-    const vStats = stats[version.id];
-
-    if (vStats && vStats.count >= cfg.minDataPoints) {
-      if (vStats.avgComposite < lowestScore) {
-        lowestScore = vStats.avgComposite;
-        lowestVersion = version;
-      }
+  for (const version of registry.versions) {
+    if (!version.active) continue;
+    if (version.id === registry.currentDefault) continue;
+    if (version.weight < MIN_WEIGHT_THRESHOLD) {
+      version.active = false;
+      version.weight = 0;
+      retired.push(version.id);
+      logger.info(
+        { retiredId: version.id, weight: version.weight },
+        "[evaluation] Culled version below minimum weight threshold",
+      );
     }
   }
 
-  if (!lowestVersion) {
-    lowestVersion = candidates[candidates.length - 1];
+  let activeVersions = registry.versions.filter((v) => v.active);
+
+  while (activeVersions.length > cfg.maxVersions) {
+    const candidates = activeVersions.filter((v) => v.id !== registry.currentDefault);
+
+    if (candidates.length === 0) {
+      logger.warn("[evaluation] Cannot retire — only current default remains");
+      break;
+    }
+
+    const scored = candidates
+      .filter((v) => stats[v.id] && stats[v.id].count >= cfg.minDataPoints)
+      .sort((a, b) => (stats[a.id]?.avgComposite ?? 0) - (stats[b.id]?.avgComposite ?? 0));
+
+    const victim = scored.length > 0 ? scored[0] : candidates[candidates.length - 1];
+
+    victim.active = false;
+    victim.weight = 0;
+    retired.push(victim.id);
+
+    logger.info(
+      {
+        retiredId: victim.id,
+        composite: stats[victim.id]?.avgComposite?.toFixed(2) ?? "n/a",
+        activeRemaining: activeVersions.length - 1,
+      },
+      "[evaluation] Retired lowest-performing version",
+    );
+
+    activeVersions = registry.versions.filter((v) => v.active);
   }
 
-  lowestVersion.active = false;
-  lowestVersion.weight = 0;
-
-  const remainingActive = registry.versions.filter((v) => v.active);
-  if (remainingActive.length > 0) {
+  if (retired.length > 0) {
     registry.versions = normalizeWeights(registry.versions);
   }
 
-  logger.info(
-    { retiredId: lowestVersion.id, lowestScore: lowestScore.toFixed(2) },
-    "[evaluation] Retired lowest-performing version",
-  );
-
-  return lowestVersion.id;
+  return retired;
 }

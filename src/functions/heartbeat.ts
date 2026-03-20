@@ -1,20 +1,8 @@
 /**
- * Heartbeat — adaptive memory maintenance.
+ * Heartbeat — adaptive memory maintenance (cron, default every 30min).
  *
- * Runs on a frequent cron (default: every 30min) but only triggers
- * LLM distillation when actually needed:
- *
- * 1. Parse last_heartbeat timestamp from MEMORY.md (no LLM, just string parse)
- * 2. Check today's daily log size
- * 3. IF log > threshold OR hours since last distill > max → run distillation
- * 4. ELSE → skip (costs nothing)
- *
- * This means:
- * - Light days: distills once or twice
- * - Heavy days (lots of "remember" calls): distills as soon as logs get chunky
- * - Most runs are just a file stat + string parse — no LLM cost
- *
- * Each step is durable — retries on failure, observable in Inngest dashboard.
+ * Only triggers LLM distillation when daily log exceeds a size threshold
+ * or enough hours have passed. Most runs are just a file check — no LLM cost.
  */
 
 import { inngest } from "../client.ts";
@@ -134,6 +122,8 @@ export const heartbeat = inngest.createFunction(
 
       const prompt = `You are maintaining an AI agent's long-term memory file (MEMORY.md).
 
+This file is ONLY for user-specific memory — facts about the user, their preferences, their projects, and conversation context. It is NOT for agent behavioral changes, tone adjustments, or prompt improvements.
+
 ## Current MEMORY.md
 ${context.currentMemory || "(empty — this is a fresh start)"}
 
@@ -141,11 +131,26 @@ ${context.currentMemory || "(empty — this is a fresh start)"}
 ${dailyLogText}
 
 ## Your Task
-Update MEMORY.md by incorporating important information from the daily logs:
+Update MEMORY.md by incorporating ONLY user-specific information from the daily logs:
 
-1. **Add** new facts, decisions, preferences, and lessons learned
+### INCLUDE (user-specific memory):
+- User preferences, habits, and communication style
+- Facts about the user (name, role, projects, tools they use)
+- Project context (what they're working on, decisions made, constraints)
+- Relationships and people mentioned
+- Task outcomes and follow-ups the user cares about
+
+### EXCLUDE (these belong in the prompt versioning system, not memory):
+- Agent behavioral instructions ("be more concise", "use fewer tools")
+- Tone or style guidance ("respond formally", "be more direct")
+- Tool usage patterns or improvements
+- Response quality feedback or scoring insights
+- Any instruction that tells the agent HOW to behave
+
+## Rules
+1. **Add** new user-specific facts and preferences
 2. **Update** existing entries if new information supersedes them
-3. **Remove** anything that's clearly outdated or no longer relevant
+3. **Remove** anything clearly outdated or no longer relevant
 4. **Keep it concise** — this is curated memory, not a raw log
 5. **Preserve structure** — use markdown headers and bullets for organization
 6. **Don't include timestamps or log formatting** — distill into clean notes

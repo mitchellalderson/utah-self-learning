@@ -1,11 +1,4 @@
-/**
- * Sub-Agent — an isolated agent loop that can run sync or async.
- *
- * Sync mode: invoked by parent via step.invoke(), returns result to parent.
- * Async mode: triggered by event, runs independently, replies directly to user.
- *
- * The sub-agent does NOT have the delegate_task tool to prevent recursive spawning.
- */
+/** Sub-Agent — isolated agent loop (sync or async). No delegate_task to prevent recursion. */
 
 import { inngest, agentSubagentSpawn } from "../client.ts";
 import { createAgentLoop } from "../agent-loop.ts";
