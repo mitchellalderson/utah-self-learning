@@ -25,6 +25,9 @@ export interface VersionStats {
   avgTone: number;
   avgComposite: number;
   recentRationales: string[];
+  recentImprovementHints: string[];
+  issueTagCounts: Record<string, number>;
+  answerTypeCounts: Record<string, number>;
 }
 
 export interface Underperformer {
@@ -32,9 +35,58 @@ export interface Underperformer {
   stats: VersionStats;
   reason: string;
   gapToBest: number;
+  bestVersionId?: string;
 }
 
 export type VersionStatsMap = Record<string, VersionStats>;
+
+function calculateComposite(entry: ScoreEntry): number {
+  return (
+    entry.relevance * 0.35 +
+    entry.completeness * 0.4 +
+    entry.toolEfficiency * 0.1 +
+    entry.tone * 0.15
+  );
+}
+
+function incrementCount(counts: Record<string, number>, key: string | undefined): void {
+  if (!key) return;
+  counts[key] = (counts[key] || 0) + 1;
+}
+
+function appendBounded(items: string[], values: string[], maxItems: number): void {
+  for (const value of values) {
+    if (!value) continue;
+    items.push(value);
+    if (items.length > maxItems) {
+      items.shift();
+    }
+  }
+}
+
+function formatTopCounts(counts: Record<string, number>, limit: number = 8): string {
+  const entries = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit);
+
+  if (entries.length === 0) {
+    return "- none";
+  }
+
+  return entries.map(([key, count]) => `- ${key}: ${count}`).join("\n");
+}
+
+function formatInlineTopCounts(counts: Record<string, number>, limit: number = 4): string {
+  const entries = Object.entries(counts)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit);
+
+  if (entries.length === 0) {
+    return "-";
+  }
+
+  return entries.map(([key, count]) => `${key} (${count})`).join(", ");
+}
 
 function getScoresDir(): string {
   return resolve(config.workspace.root, "scores");
@@ -75,6 +127,7 @@ export function aggregateByVersion(
 
   for (const entry of scores) {
     const existing = byVersion[entry.promptVersion];
+    const composite = calculateComposite(entry);
 
     if (!existing) {
       byVersion[entry.promptVersion] = {
@@ -84,9 +137,16 @@ export function aggregateByVersion(
         avgCompleteness: entry.completeness,
         avgToolEfficiency: entry.toolEfficiency,
         avgTone: entry.tone,
-        avgComposite: entry.composite,
+        avgComposite: composite,
         recentRationales: [entry.rationale],
+        recentImprovementHints: entry.improvementHints?.slice(0, maxRationales) ?? [],
+        issueTagCounts: {},
+        answerTypeCounts: {},
       };
+      incrementCount(byVersion[entry.promptVersion].answerTypeCounts, entry.answerType);
+      for (const tag of entry.issueTags ?? []) {
+        incrementCount(byVersion[entry.promptVersion].issueTagCounts, tag);
+      }
     } else {
       const n = existing.count;
       existing.count = n + 1;
@@ -95,10 +155,16 @@ export function aggregateByVersion(
       existing.avgToolEfficiency =
         (existing.avgToolEfficiency * n + entry.toolEfficiency) / (n + 1);
       existing.avgTone = (existing.avgTone * n + entry.tone) / (n + 1);
-      existing.avgComposite = (existing.avgComposite * n + entry.composite) / (n + 1);
+      existing.avgComposite = (existing.avgComposite * n + composite) / (n + 1);
 
-      if (existing.recentRationales.length < maxRationales) {
-        existing.recentRationales.push(entry.rationale);
+      existing.recentRationales.push(entry.rationale);
+      if (existing.recentRationales.length > maxRationales) {
+        existing.recentRationales.shift();
+      }
+      appendBounded(existing.recentImprovementHints, entry.improvementHints ?? [], maxRationales);
+      incrementCount(existing.answerTypeCounts, entry.answerType);
+      for (const tag of entry.issueTags ?? []) {
+        incrementCount(existing.issueTagCounts, tag);
       }
     }
   }
@@ -164,11 +230,74 @@ export function identifyUnderperformers(
         stats: vStats,
         reason,
         gapToBest,
+        bestVersionId,
       });
     }
   }
 
   return underperformers.sort((a, b) => b.gapToBest - a.gapToBest);
+}
+
+async function loadReferenceSoul(underperformer: Underperformer): Promise<string> {
+  if (!underperformer.bestVersionId || underperformer.bestVersionId === underperformer.versionId) {
+    return "";
+  }
+
+  const referenceSoul = await loadVersionedSoul(underperformer.bestVersionId);
+  if (!referenceSoul) return "";
+
+  return `## Best Current SOUL.md (version: ${underperformer.bestVersionId})
+Use this as a behavioral reference. Preserve patterns that likely helped it outperform the current version, but do not copy it blindly.
+
+${referenceSoul}
+`;
+}
+
+function findPromptRuleViolations(content: string): string[] {
+  const checks: Array<[RegExp, string]> = [
+    [/\balways\s+(include|provide|add|list|end|ask)\b/i, "Avoid absolute always-rules"],
+    [
+      /\bask\b.{0,80}\bbefore proceeding\b/i,
+      "Do not ask for context before giving a useful default",
+    ],
+    [/\bavoid deep dives?\b/i, "Do not discourage depth by default"],
+    [/\bpros\s*\/\s*cons table\b/i, "Do not require pros/cons tables"],
+    [/\bat least\s+\w+\s+(items|failure|scenarios|pros|cons)\b/i, "Do not require fixed counts"],
+    [
+      /\b(sentences?|explanations?)\s*(?:<=|<|under|less than)\s*\d+/i,
+      "Do not impose strict length caps",
+    ],
+    [/\bNext step[.:]/i, "Do not require a canned ending phrase"],
+    [/[“"](?:bash|yaml|terraform|kubectl)[”"]\s+tool/i, "Do not mention imaginary tools"],
+    [/\bTool Usage Checklist\b/i, "Do not include a fake tool checklist"],
+    [/\bFollow this pattern for every\b/i, "Do not force one pattern for every answer"],
+  ];
+
+  return checks.filter(([pattern]) => pattern.test(content)).map(([, message]) => message);
+}
+
+async function repairGeneratedPrompt(content: string, violations: string[]): Promise<string> {
+  const response = await callLLM(
+    "You repair AI behavioral prompts. Output only the corrected SOUL.md content.",
+    [
+      {
+        role: "user" as const,
+        timestamp: Date.now(),
+        content: `Repair this SOUL.md so it keeps the useful guidance but removes the listed rule violations.
+
+## Violations
+${violations.map((v, i) => `${i + 1}. ${v}`).join("\n")}
+
+## SOUL.md
+${content}
+
+Return ONLY the repaired SOUL.md. Start with "# Soul".`,
+      },
+    ],
+    [],
+  );
+
+  return response.text;
 }
 
 export async function generateImprovedPrompt(underperformer: Underperformer): Promise<string> {
@@ -181,17 +310,35 @@ export async function generateImprovedPrompt(underperformer: Underperformer): Pr
   const rationales = underperformer.stats.recentRationales
     .map((r, i) => `${i + 1}. ${r}`)
     .join("\n");
+  const improvementHints =
+    underperformer.stats.recentImprovementHints.length > 0
+      ? underperformer.stats.recentImprovementHints.map((h, i) => `${i + 1}. ${h}`).join("\n")
+      : "No structured hints are available yet. Infer cautiously from the rationales.";
+  const issuePatternSummary = formatTopCounts(underperformer.stats.issueTagCounts);
+  const answerTypeSummary = formatTopCounts(underperformer.stats.answerTypeCounts);
+  const referenceSoul = await loadReferenceSoul(underperformer);
 
   const prompt = `You are improving an AI agent's behavioral prompt (SOUL.md).
 
 ## Current SOUL.md (version: ${underperformer.versionId})
 ${currentSoul}
 
+${referenceSoul}
+
 ## Performance Issues
 This version is underperforming: ${underperformer.reason}
 
 ### Recent Score Rationales (showing issues)
 ${rationales}
+
+### Structured Issue Tags
+${issuePatternSummary}
+
+### Answer Type Mix
+${answerTypeSummary}
+
+### Recent Improvement Hints
+${improvementHints}
 
 ### Average Scores
 - Relevance: ${underperformer.stats.avgRelevance.toFixed(1)}/10
@@ -203,11 +350,66 @@ ${rationales}
 ## Your Task
 Generate an improved SOUL.md that addresses these issues:
 
-1. **Analyze** the rationales to identify patterns in what's going wrong
-2. **Adjust** instructions to fix recurring problems
-3. **Preserve** what's working well
-4. **Keep it concise** — this is a behavioral guide, not a manual
-5. **Focus on actionable guidance** — specific instructions that change behavior
+1. **Analyze** the rationales to identify patterns in what's going wrong.
+2. **Recover what works** from the best current prompt when one is provided.
+3. **Adjust** instructions to fix recurring problems.
+4. **Preserve** what's working well.
+5. **Keep it concise** — this is a behavioral guide, not a manual.
+6. **Focus on actionable guidance** — specific instructions that change behavior.
+
+## REQUIRED IMPROVEMENT DIRECTION
+The score history shows that shallow answers, missing production details, and clarification-only replies hurt performance. It also shows that overly rigid templates regress.
+
+Your improved SOUL.md must guide the agent to:
+- Start with the most likely answer, diagnosis, or recommendation.
+- Adapt to the request type instead of forcing one answer skeleton:
+  - Debugging: rank likely causes, then give verification commands or checks.
+  - Design: describe architecture, tradeoffs, constraints, failure modes, and operations.
+  - Comparison: compare against the user's stated scale and requirements, then recommend.
+  - Implementation: provide concrete commands, config, code, manifests, policies, queries, or workflow YAML when useful.
+- If context is missing, state a reasonable assumption and continue. Ask a clarifying question only when a safe answer is impossible.
+- Include deploy/verify/monitor/fail/rollback guidance for production changes.
+- Prioritize scenario-specific details over generic checklists.
+- Be concise without becoming shallow.
+- Keep domain facts correct; avoid invalid fields, fake APIs, placeholder policies, or commands that commonly fail.
+
+## PATTERNS TO AVOID
+Do NOT add instructions that:
+- Always require a snippet, table, migration plan, fixed number of failure modes, or fixed ending phrase.
+- Tell the agent to avoid deep dives by default; many hard technical questions require depth.
+- Tell the agent to ask for missing context before giving any useful answer.
+- Mention imaginary tools such as "bash tool", "yaml tool", or "terraform tool".
+- Overfit to one domain such as Kubernetes when the questions span DevOps, IaC, networking, observability, cloud architecture, cost, and security.
+- Impose strict word limits or sentence-length limits that make answers incomplete.
+- Add canned examples that are likely to leak into unrelated answers.
+
+## RECOMMENDED PROMPT SHAPE
+Use a compact structure similar to:
+
+# Soul
+
+Be helpful, concise, and direct. Answer with practitioner-grade detail.
+Use tools only when they add value.
+
+## Core Behavior
+- Start with the most likely answer, diagnosis, or recommendation.
+- Adapt to debugging, design, comparison, and implementation requests.
+- State reasonable assumptions and proceed when context is missing.
+- Use tables only when they make comparison clearer.
+
+## Depth Standard
+- Anchor the answer in the user's exact scenario.
+- Include concrete commands, config, code, policies, queries, or manifests when useful.
+- Cover verification, failure modes, edge cases, and rollback for production changes.
+- Explain tradeoffs plainly.
+- Avoid generic checklists and invalid technical details.
+
+## Domain Cues
+- Include short cues for Kubernetes, GitOps/CI, Terraform/IaC, networking, observability, cloud architecture, cost, and security.
+
+## Tone
+- Be crisp, confident when warranted, and free of filler.
+- End with validation or the next practical action.
 
 ## CRITICAL OUTPUT RULES
 - Output ONLY the improved SOUL.md content
@@ -226,7 +428,27 @@ The agent using this SOUL.md should NOT know about scoring criteria or evaluatio
     [],
   );
 
-  return response.text;
+  const violations = findPromptRuleViolations(response.text);
+  if (violations.length === 0) {
+    return response.text;
+  }
+
+  logger.warn(
+    { versionId: underperformer.versionId, violations },
+    "[evaluation] Generated prompt hit forbidden patterns; repairing",
+  );
+
+  const repaired = await repairGeneratedPrompt(response.text, violations);
+  const remainingViolations = findPromptRuleViolations(repaired);
+
+  if (remainingViolations.length > 0) {
+    logger.warn(
+      { versionId: underperformer.versionId, remainingViolations },
+      "[evaluation] Repaired prompt still contains forbidden patterns",
+    );
+  }
+
+  return repaired;
 }
 
 export function getNextVersionId(registry: PromptRegistry): string {
@@ -398,6 +620,10 @@ export async function savePerformanceSummary(
     (v) =>
       `| ${v.id}${isDefault(v.id) ? " ⭐" : ""} | ${weightPct(v.weight)} | ${v.stats.count} | ${score(v.stats.avgRelevance)} | ${score(v.stats.avgCompleteness)} | ${score(v.stats.avgToolEfficiency)} | ${score(v.stats.avgTone)} | **${score(v.stats.avgComposite)}** |`,
   );
+  const issueRows = activeVersions.map(
+    (v) =>
+      `| ${v.id}${isDefault(v.id) ? " ⭐" : ""} | ${formatInlineTopCounts(v.stats.issueTagCounts)} | ${formatInlineTopCounts(v.stats.answerTypeCounts)} |`,
+  );
 
   const content = `# Performance Summary
 Last updated: ${new Date().toISOString()}
@@ -406,6 +632,12 @@ Current default: ${registry.currentDefault}
 | Version | Weight | Count | Relevance | Completeness | Tool Eff | Tone | **Composite** |
 |---------|--------|-------|-----------|--------------|----------|------|---------------|
 ${rows.join("\n")}
+
+## Failure Patterns
+
+| Version | Top Issue Tags | Answer Types |
+|---------|----------------|--------------|
+${issueRows.join("\n")}
 `;
 
   const filePath = resolve(config.workspace.root, "performance-summary.md");
@@ -422,6 +654,14 @@ const MIN_WEIGHT_THRESHOLD = 0.02;
 export function enforceVersionCap(stats: VersionStatsMap, registry: PromptRegistry): string[] {
   const cfg = config.evaluation;
   const retired: string[] = [];
+  const activeWithStats = registry.versions
+    .filter((v) => v.active)
+    .map((v) => ({ version: v, stats: stats[v.id] }))
+    .filter((v) => v.stats && v.stats.count >= cfg.minDataPoints);
+  const bestComposite = activeWithStats.reduce(
+    (best, v) => Math.max(best, v.stats.avgComposite),
+    0,
+  );
 
   for (const version of registry.versions) {
     if (!version.active) continue;
@@ -433,6 +673,25 @@ export function enforceVersionCap(stats: VersionStatsMap, registry: PromptRegist
       logger.info(
         { retiredId: version.id, weight: version.weight },
         "[evaluation] Culled version below minimum weight threshold",
+      );
+      continue;
+    }
+
+    const vStats = stats[version.id];
+    const hasEnoughData = vStats && vStats.count >= cfg.minDataPoints;
+    const gapToBest = hasEnoughData ? bestComposite - vStats.avgComposite : 0;
+
+    if (hasEnoughData && gapToBest >= cfg.retireScoreGap) {
+      version.active = false;
+      version.weight = 0;
+      retired.push(version.id);
+      logger.info(
+        {
+          retiredId: version.id,
+          composite: vStats.avgComposite.toFixed(2),
+          gapToBest: gapToBest.toFixed(2),
+        },
+        "[evaluation] Retired version below best performer",
       );
     }
   }

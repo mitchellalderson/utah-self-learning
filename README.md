@@ -6,12 +6,16 @@ A durable AI agent built with [Inngest](https://inngest.com) and [pi-ai](https:/
 
 Simple TypeScript that gives you:
 
-- 🔄 **Durable agent loop** — every LLM call and tool execution is an Inngest step
-- 🔁 **Automatic retries** — LLM API timeouts are handled by Inngest, not your code
-- 🔒 **Singleton concurrency** — one conversation at a time per chat, no race conditions
-- ⚡ **Cancel on new message** — user sends again? Current run cancels, new one starts
-- 📡 **Multi-channel** — Slack, Telegram, and more via a simple channel interface
-- 🏠 **Local development** — runs on your machine via `connect()`, no server needed
+- **Durable agent loop** — every LLM call and tool execution is an Inngest step
+- **Automatic retries** — LLM API timeouts are handled by Inngest, not your code
+- **Singleton concurrency** — one conversation at a time per chat, no race conditions
+- **Cancel on new message** — user sends again? Current run cancels, new one starts
+- **Multi-channel** — Slack, Telegram, and more via a simple channel interface
+- **Local development** — runs on your machine via `connect()`, no server needed
+- **Response scoring** — async LLM-based quality evaluation after every reply
+- **Prompt versioning** — A/B test behavioral prompts with weighted random selection
+- **Evaluation pipeline** — automated prompt improvement based on score analysis
+- **Sub-agents** — delegate tasks to isolated agent loops (sync or async)
 
 ## Architecture
 
@@ -91,16 +95,19 @@ src/
 │   ├── context.ts             # System prompt builder with workspace file injection
 │   ├── session.ts             # JSONL session persistence
 │   ├── memory.ts              # File-based memory system (daily logs + distillation)
-│   ├── prompt-version.ts    # Prompt versioning and A/B testing
-│   ├── scoring.ts           # Response quality evaluation
-│   ├── evaluation.ts        # Prompt performance analysis and improvement
-│   └── compaction.ts        # LLM-powered conversation summarization
+│   ├── prompt-version.ts      # Prompt versioning and A/B testing
+│   ├── scoring.ts             # Response quality evaluation
+│   ├── evaluation.ts          # Prompt performance analysis and improvement
+│   ├── compaction.ts          # LLM-powered conversation summarization
+│   └── logger.ts              # Structured logging utility
 ├── functions/
 │   ├── message.ts             # Main agent function (singleton + cancelOn)
 │   ├── send-reply.ts          # Channel-agnostic reply dispatch
+│   ├── score.ts               # Async response quality scoring
 │   ├── acknowledge-message.ts # Message acknowledgment (typing indicator, etc.)
 │   ├── heartbeat.ts           # Cron-based memory maintenance
 │   ├── evaluate-prompts.ts    # Cron-based prompt improvement
+│   ├── sub-agent.ts           # Isolated sub-agent loops (sync/async task delegation)
 │   └── failure-handler.ts     # Global error handler with notifications
 └── channels/
     ├── types.ts               # ChannelHandler interface
@@ -113,6 +120,7 @@ src/
         ├── transform.ts       # Webhook transform
         └── format.ts          # Formatting for channel messages
 workspace/                       # Agent workspace (persisted across runs)
+├── IDENTITY.md                # Agent name, role, emoji
 ├── SOUL.md                    # Agent personality and behavioral guidelines (fallback)
 ├── USER.md                    # User information
 ├── MEMORY.md                  # Long-term memory (agent-writable)
@@ -141,25 +149,27 @@ Inngest auto-indexes duplicate step IDs in loops (`think:0`, `think:1`, etc.), s
 
 One incoming message triggers multiple independent functions:
 
-| Function                 | Purpose                                  | Config                                    |
-| ------------------------ | ---------------------------------------- | ----------------------------------------- |
-| `agent-handle-message`   | Run the agent loop                       | Singleton per chat, cancel on new message |
-| `acknowledge-message`    | Show "typing..." immediately             | No retries (best effort)                  |
-| `send-reply`             | Format and send the response             | 3 retries, channel dispatch               |
-| `agent-handle-score`     | Evaluate response quality (async)        | 1 retry, fires after reply sent           |
-| `agent-heartbeat`        | Distill daily logs into long-term memory | Cron (every 30 min)                       |
-| `evaluate-prompts`       | Analyze scores, improve prompts          | Cron (every 6 hours)                      |
-| `global-failure-handler` | Catch errors, notify user                | Triggered by `inngest/function.failed`    |
+| Function                 | Purpose                                    | Config                                    |
+| ------------------------ | ------------------------------------------ | ----------------------------------------- |
+| `agent-handle-message`   | Run the agent loop                         | Singleton per chat, cancel on new message |
+| `acknowledge-message`    | Show "typing..." immediately               | No retries (best effort)                  |
+| `send-reply`             | Format and send the response               | 3 retries, channel dispatch               |
+| `agent-handle-score`     | Evaluate response quality (async)          | 1 retry, fires after reply sent           |
+| `agent-heartbeat`        | Distill daily logs into long-term memory   | Cron (every 30 min)                       |
+| `evaluate-prompts`       | Analyze scores, improve prompts            | Cron (every 6 hours)                      |
+| `agent-sub-agent`        | Run isolated sub-agent for delegated tasks | 1 retry, sync or async                    |
+| `global-failure-handler` | Catch errors, notify user                  | Triggered by `inngest/function.failed`    |
 
 ### Workspace Context Injection
 
 The agent reads markdown files from the workspace directory and injects them into the system prompt:
 
-| File        | Purpose                                                    |
-| ----------- | ---------------------------------------------------------- |
-| `SOUL.md`   | Agent personality, behavioral guidelines, tone, boundaries |
-| `USER.md`   | Info about the user (name, timezone, preferences)          |
-| `MEMORY.md` | Curated long-term memory (agent-writable)                  |
+| File          | Purpose                                                    |
+| ------------- | ---------------------------------------------------------- |
+| `IDENTITY.md` | Agent name, role, and emoji                                |
+| `SOUL.md`     | Agent personality, behavioral guidelines, tone, boundaries |
+| `USER.md`     | Info about the user (name, timezone, preferences)          |
+| `MEMORY.md`   | Curated long-term memory (agent-writable)                  |
 
 Edit these files to customize your agent's personality and knowledge. The agent can also update `MEMORY.md` using the `write` tool to remember things across conversations.
 

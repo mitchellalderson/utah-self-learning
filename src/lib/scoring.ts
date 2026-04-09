@@ -12,12 +12,15 @@ export interface ScoreEntry {
   timestamp: string;
   sessionKey: string;
   promptVersion: string;
+  answerType?: string;
   relevance: number;
   completeness: number;
   toolEfficiency: number;
   tone: number;
   composite: number;
   rationale: string;
+  issueTags?: string[];
+  improvementHints?: string[];
 }
 
 export interface ScoreInput {
@@ -32,6 +35,38 @@ export interface ScoreResult {
   entry: ScoreEntry;
   rawLlmResponse: string;
 }
+
+const ALLOWED_ANSWER_TYPES = new Set([
+  "debugging",
+  "implementation",
+  "design",
+  "comparison",
+  "incident_response",
+  "explanation",
+  "command_request",
+  "other",
+]);
+
+const ALLOWED_ISSUE_TAGS = new Set([
+  "generic_answer",
+  "missed_core_ask",
+  "missing_concrete_steps",
+  "missing_commands_or_config",
+  "missing_failure_modes",
+  "missing_rollback",
+  "shallow_tradeoffs",
+  "weak_verification",
+  "incorrect_technical_detail",
+  "placeholder_or_fake_detail",
+  "clarification_only",
+  "unnecessary_table",
+  "too_verbose",
+  "too_shallow",
+  "truncated",
+  "unnecessary_tool_use",
+  "missed_tool_use",
+  "good_answer_minor_gaps",
+]);
 
 function getScoresPath(): string {
   const date = new Date().toISOString().split("T")[0];
@@ -48,6 +83,16 @@ async function ensureScoresDir(): Promise<void> {
 const SCORING_PROMPT = `You are a harsh, expert-level response quality evaluator. Your job is to find flaws, not give praise. A score of 7+ should be rare and reserved for genuinely excellent responses. Most responses should score 3-6.
 
 Score this agent response on 4 dimensions (0-10 each). Be brutally honest.
+
+First classify the user's request into one answerType:
+- debugging
+- implementation
+- design
+- comparison
+- incident_response
+- explanation
+- command_request
+- other
 
 Scoring criteria:
 
@@ -83,6 +128,30 @@ COMMON DEDUCTIONS (apply these aggressively):
 - Response is truncated or cuts off mid-thought: -4 to completeness
 - No mention of failure modes, rollback, or what can go wrong: -2 to completeness
 
+Issue tags:
+Choose 1-5 tags from this controlled list. Use only tags that materially affected the score:
+- generic_answer
+- missed_core_ask
+- missing_concrete_steps
+- missing_commands_or_config
+- missing_failure_modes
+- missing_rollback
+- shallow_tradeoffs
+- weak_verification
+- incorrect_technical_detail
+- placeholder_or_fake_detail
+- clarification_only
+- unnecessary_table
+- too_verbose
+- too_shallow
+- truncated
+- unnecessary_tool_use
+- missed_tool_use
+- good_answer_minor_gaps
+
+Improvement hints:
+Provide 1-3 short imperative hints that would help the prompt generator fix future answers. Focus on behavior, not this single answer's content.
+
 User message:
 {USER_MESSAGE}
 
@@ -92,7 +161,7 @@ Agent response:
 Tool calls made: {TOOL_CALL_COUNT}
 
 Respond with ONLY valid JSON, no markdown code fences:
-{"relevance": N, "completeness": N, "toolEfficiency": N, "tone": N, "rationale": "1-2 sentence explanation of biggest weaknesses"}`;
+{"answerType": "debugging", "relevance": N, "completeness": N, "toolEfficiency": N, "tone": N, "issueTags": ["missing_concrete_steps"], "improvementHints": ["Include exact verification commands when the user asks for debugging."], "rationale": "1-2 sentence explanation of biggest weaknesses"}`;
 
 export async function scoreResponse(input: ScoreInput): Promise<ScoreResult> {
   let model: ReturnType<typeof getModel> | Model<"openai-completions">;
@@ -174,21 +243,37 @@ export async function scoreResponse(input: ScoreInput): Promise<ScoreResult> {
     .trim();
 
   let scores: {
+    answerType: string;
     relevance: number;
     completeness: number;
     toolEfficiency: number;
     tone: number;
     rationale: string;
+    issueTags: string[];
+    improvementHints: string[];
   };
 
   try {
     const parsed = JSON.parse(text);
+    const answerType = String(parsed.answerType || "other").slice(0, 40);
+    const issueTags = Array.isArray(parsed.issueTags)
+      ? parsed.issueTags
+          .map((tag: unknown) => String(tag).slice(0, 80))
+          .filter((tag: string) => ALLOWED_ISSUE_TAGS.has(tag))
+          .slice(0, 5)
+      : [];
+
     scores = {
+      answerType: ALLOWED_ANSWER_TYPES.has(answerType) ? answerType : "other",
       relevance: Math.max(0, Math.min(10, Number(parsed.relevance) || 0)),
       completeness: Math.max(0, Math.min(10, Number(parsed.completeness) || 0)),
       toolEfficiency: Math.max(0, Math.min(10, Number(parsed.toolEfficiency) || 0)),
       tone: Math.max(0, Math.min(10, Number(parsed.tone) || 0)),
       rationale: String(parsed.rationale || "").slice(0, 500),
+      issueTags,
+      improvementHints: Array.isArray(parsed.improvementHints)
+        ? parsed.improvementHints.map((hint: unknown) => String(hint).slice(0, 180)).slice(0, 3)
+        : [],
     };
   } catch (err) {
     logger.warn(
@@ -196,27 +281,36 @@ export async function scoreResponse(input: ScoreInput): Promise<ScoreResult> {
       "[scoring] Failed to parse LLM scoring response",
     );
     scores = {
+      answerType: "other",
       relevance: 5,
       completeness: 5,
       toolEfficiency: 5,
       tone: 5,
       rationale: "Failed to parse LLM scoring response",
+      issueTags: ["placeholder_or_fake_detail"],
+      improvementHints: ["Return valid JSON from the scorer."],
     };
   }
 
   const composite =
-    (scores.relevance + scores.completeness + scores.toolEfficiency + scores.tone) / 4;
+    scores.relevance * 0.35 +
+    scores.completeness * 0.4 +
+    scores.toolEfficiency * 0.1 +
+    scores.tone * 0.15;
 
   const entry: ScoreEntry = {
     timestamp: new Date().toISOString(),
     sessionKey: input.sessionKey,
     promptVersion: input.promptVersion,
+    answerType: scores.answerType,
     relevance: scores.relevance,
     completeness: scores.completeness,
     toolEfficiency: scores.toolEfficiency,
     tone: scores.tone,
     composite: Math.round(composite * 10) / 10,
     rationale: scores.rationale,
+    issueTags: scores.issueTags,
+    improvementHints: scores.improvementHints,
   };
 
   return { entry, rawLlmResponse: rawText };
